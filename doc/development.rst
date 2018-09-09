@@ -40,10 +40,12 @@ These steps are a guideline on how to add a new backend to python-can.
   ``can.interfaces.VALID_INTERFACES``.
 - Add docs where appropiate, like in ``doc/interfaces.rst`` and add
   an entry in ``doc/interface/*``.
+  Update ``doc/scripts.rst`` accordingly.
 - Add tests in ``test/*`` where appropiate.
 
+
 About the ``BusABC`` class
-==========================
+--------------------------
 
 Concrete implementations *have to* implement the following:
     * :meth:`~can.BusABC.send` to send individual messages
@@ -53,7 +55,7 @@ Concrete implementations *have to* implement the following:
       the underlying bus and/or channel
 
 They *might* implement the following:
-    * :meth:`~can.BusABC.flush_tx_buffer` to allow discrading any
+    * :meth:`~can.BusABC.flush_tx_buffer` to allow discarding any
       messages yet to be sent
     * :meth:`~can.BusABC.shutdown` to override how the bus should
       shut down
@@ -71,13 +73,21 @@ They *might* implement the following:
 
     *TL;DR*: Only override :meth:`~can.BusABC._recv_internal`,
     never :meth:`~can.BusABC.recv` directly.
-
+    
     Previously, concrete bus classes had to override :meth:`~can.BusABC.recv`
     directly instead of :meth:`~can.BusABC._recv_internal`, but that has
     changed to allow the abstract base class to handle in-software message
     filtering as a fallback. All internal interfaces now implement that new
     behaviour. Older (custom) interfaces might still be implemented like that
     and thus might not provide message filtering:
+
+This is the entire ABC bus class with all internal methods:
+
+.. autoclass:: can.BusABC
+    :private-members:
+    :special-members:
+
+Concrete instances are created by :class:`can.Bus`.
 
 
 Code Structure

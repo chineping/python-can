@@ -29,7 +29,7 @@ except ImportError:
 
 # Import Modules
 # ==============
-from can import BusABC, Message
+from can import BusABC, Message, CanError
 from can.util import len2dlc, dlc2len
 from .exceptions import VectorError
 
@@ -50,7 +50,7 @@ class VectorBus(BusABC):
 
     def __init__(self, channel, can_filters=None, poll_interval=0.01,
                  receive_own_messages=False,
-                 bitrate=None, rx_queue_size=2**14, app_name="CANalyzer", fd=False, data_bitrate=None, sjwAbr=2, tseg1Abr=6, tseg2Abr=3, sjwDbr=2, tseg1Dbr=6, tseg2Dbr=3, **config):
+                 bitrate=None, rx_queue_size=2**14, app_name="CANalyzer", serial=None, fd=False, data_bitrate=None, sjwAbr=2, tseg1Abr=6, tseg2Abr=3, sjwDbr=2, tseg1Dbr=6, tseg2Dbr=3, **config):
         """
         :param list channel:
             The channel indexes to create this bus with.
@@ -65,6 +65,11 @@ class VectorBus(BusABC):
             CAN-FD: range 8192…524288
         :param str app_name:
             Name of application in Hardware Config.
+            If set to None, the channel should be a global channel index.
+        :param int serial:
+            Serial number of the hardware to be used.
+            If set, the channel parameter refers to the channels ONLY on the specified hardware.
+            If set, the app_name is unused.
         :param bool fd:
             If CAN-FD frames should be supported.
         :param int data_bitrate:
@@ -85,6 +90,22 @@ class VectorBus(BusABC):
         self.channel_info = 'Application %s: %s' % (
             app_name, ', '.join('CAN %d' % (ch + 1) for ch in self.channels))
 
+        if serial is not None:
+            app_name = None
+            channel_index = []
+            channel_configs = get_channel_configs()
+            for channel_config in channel_configs:
+                if channel_config.serialNumber == serial:
+                    if channel_config.hwChannel in self.channels:
+                        channel_index.append(channel_config.channelIndex)
+            if len(channel_index) > 0:
+                if len(channel_index) != len(self.channels):
+                    LOG.info("At least one defined channel wasn't found on the specified hardware.")
+                self.channels = channel_index
+            else:
+                # Is there any better way to raise the error?
+                raise Exception("None of the configured channels could be found on the specified hardware.")
+
         vxlapi.xlOpenDriver()
         self.port_handle = vxlapi.XLportHandle(vxlapi.XL_INVALID_PORTHANDLE)
         self.mask = 0
@@ -92,18 +113,30 @@ class VectorBus(BusABC):
         # Get channels masks
         self.channel_masks = {}
         self.index_to_channel = {}
+        
         for channel in self.channels:
-            hw_type = ctypes.c_uint(0)
-            hw_index = ctypes.c_uint(0)
-            hw_channel = ctypes.c_uint(0)
-            vxlapi.xlGetApplConfig(self._app_name, channel, hw_type, hw_index,
-                                   hw_channel, vxlapi.XL_BUS_TYPE_CAN)
-            LOG.debug('Channel index %d found', channel)
-            idx = vxlapi.xlGetChannelIndex(hw_type.value, hw_index.value,
-                                           hw_channel.value)
+            if app_name:
+                # Get global channel index from application channel
+                hw_type = ctypes.c_uint(0)
+                hw_index = ctypes.c_uint(0)
+                hw_channel = ctypes.c_uint(0)
+                vxlapi.xlGetApplConfig(self._app_name, channel, hw_type, hw_index,
+                                       hw_channel, vxlapi.XL_BUS_TYPE_CAN)
+                LOG.debug('Channel index %d found', channel)
+                idx = vxlapi.xlGetChannelIndex(hw_type.value, hw_index.value,
+                                               hw_channel.value)
+                if idx < 0:
+                    # Undocumented behavior! See issue #353.
+                    # If hardware is unavailable, this function returns -1.
+                    # Raise an exception as if the driver
+                    # would have signalled XL_ERR_HW_NOT_PRESENT.
+                    raise VectorError(vxlapi.XL_ERR_HW_NOT_PRESENT,
+                                      "XL_ERR_HW_NOT_PRESENT",
+                                      "xlGetChannelIndex")
+            else:
+                # Channel already given as global channel
+                idx = channel
             mask = 1 << idx
-            LOG.debug('Channel %d, Type: %d, Mask: 0x%X',
-                      hw_channel.value, hw_type.value, mask)
             self.channel_masks[channel] = mask
             self.index_to_channel[idx] = channel
             self.mask |= mask
@@ -177,8 +210,7 @@ class VectorBus(BusABC):
 
         self._is_filtered = False
         super(VectorBus, self).__init__(channel=channel, can_filters=can_filters,
-            poll_interval=0.01, receive_own_messages=False, bitrate=None,
-            rx_queue_size=256, app_name="CANalyzer", **config)
+            **config)
 
     def _apply_filters(self, filters):
         if filters:
@@ -348,4 +380,29 @@ class VectorBus(BusABC):
         vxlapi.xlDeactivateChannel(self.port_handle, self.mask)
         vxlapi.xlActivateChannel(self.port_handle, self.mask,
                                      vxlapi.XL_BUS_TYPE_CAN, 0)
-  
+
+    @staticmethod
+    def _detect_available_configs():
+        configs = []
+        channel_configs = get_channel_configs()
+        LOG.info('Found %d channels', len(channel_configs))
+        for channel_config in channel_configs:
+            LOG.info('Channel index %d: %s',
+                     channel_config.channelIndex,
+                     channel_config.name.decode('ascii'))
+            configs.append({'interface': 'vector',
+                            'app_name': None,
+                            'channel': channel_config.channelIndex})
+        return configs
+
+def get_channel_configs():
+    if vxlapi is None:
+        return []
+    driver_config = vxlapi.XLdriverConfig()
+    try:
+        vxlapi.xlOpenDriver()
+        vxlapi.xlGetDriverConfig(driver_config)
+        vxlapi.xlCloseDriver()
+    except:
+        pass
+    return [driver_config.channel[i] for i in range(driver_config.channelCount)]
